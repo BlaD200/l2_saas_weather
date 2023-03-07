@@ -13,6 +13,7 @@ from fake_useragent import UserAgent
 
 
 month_date_format = '%B-%#d'
+month_article_date_format = '%B %#d'
 simple_date_format = '%Y-%m-%d'
 year_date_format = f"{month_date_format}-%Y"
 
@@ -49,7 +50,7 @@ def compose_link_for_date(parse_date: datetime) -> str:
     return url
 
 
-def links_iterator() -> Iterator[tuple[str, str]]:
+def links_iterator() -> Iterator[tuple[str, datetime]]:
     base_initial_url = \
         'https://understandingwar.org/backgrounder/' \
         'russia-ukraine-warning-update-initial-russian-offensive-campaign-assessment'
@@ -64,11 +65,11 @@ def links_iterator() -> Iterator[tuple[str, str]]:
             url = base_initial_url
         else:
             url = compose_link_for_date(parse_date)
-        yield url, parse_date.strftime(year_date_format).lower()
+        yield url, parse_date
         parse_date += delta
 
 
-async def preprocess_text(tag: Tag, paragraphs: list):
+async def preprocess_text(tag: Tag, paragraphs: list, date: datetime):
     def remove_references(text):
         text = re.sub("(\\[\d+\\])", '', text).strip()
         return text.replace('&nbsp', '')
@@ -81,27 +82,30 @@ async def preprocess_text(tag: Tag, paragraphs: list):
             else:
                 paragraphs.append(f"{'-' * level} {remove_references(li.text)}")
 
-    text = unicodedata.normalize('NFKD', tag.text)
-    if 'Click here to see' in text:
-        paragraphs.clear()  # if the date was before 'Click here' paragraph
+    text: str = unicodedata.normalize('NFKD', tag.text)
+    if (date.strftime(month_article_date_format).lower() in text.lower()
+            and (' ET' in text or ' EST' in text)
+            and len(text.split('.')) == 1):
+        paragraphs.clear()  # if the date was before 'Click here' paragraph or date paragraph
         return
-    if (tag.find('a') or tag.find('br') or tag.find('img')
-            or 'Note' in text or not text.strip()):
+    elif (tag.find('a') or tag.find('br') or tag.find('img')
+          or 'Note' in text or 'https' in text or 'Click here to see' in text or not text.strip()):
         return
+
     if tag.find('li'):
         process_list(tag)
     else:
         paragraphs.append(remove_references(text))
 
 
-async def parse_text(html: str) -> str:
+async def parse_text(html: str, date: datetime) -> str:
     paragraphs = []
     soup = BeautifulSoup(html, "html.parser")
     text_div = soup \
         .find('div', {'class': 'field-type-text-with-summary'}) \
         .find('div', {'class': 'field-item even'})
     for tag in text_div.select('p, div, ul')[3:]:  # skip by date
-        await preprocess_text(tag, paragraphs)
+        await preprocess_text(tag, paragraphs, date)
     return '\n'.join(paragraphs)
 
 
@@ -110,26 +114,26 @@ async def save_to_file(text: str, date: str):
         await f.write(text)
 
 
-async def fetch_data(url: str, date, session: aiohttp.ClientSession):
+async def fetch_data(url: str, date: datetime, session: aiohttp.ClientSession):
     ua = UserAgent()
     headers = {
         'authority': 'www.understandingwar.org',
         'accept': 'paragraphs/html,application/xhtml+xml,application/xml;',
         'user-agent': ua.random
     }
-
-    print(f"Processing {date}")
+    string_date = date.strftime(year_date_format).lower()
+    print(f"Processing {string_date}")
     response = await session.get(url=url, params='', headers=headers)
 
     if response.status != 200:
         if response.status == 404:
-            print(f"No report for {date}")
+            print(f"No report for {string_date}")
         elif response.status == 403:
-            print(f"Access denied for {date}")
+            print(f"Access denied for {string_date}")
         return
 
-    text = await parse_text(await response.text())
-    await save_to_file(text, date)
+    text = await parse_text(await response.text(), date)
+    await save_to_file(text, date.strftime(simple_date_format))
 
 
 async def collect_data():
